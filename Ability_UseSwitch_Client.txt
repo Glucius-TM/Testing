@@ -1,0 +1,396 @@
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------  Ability USE and SWITCH Client  -------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- Internal custom properties
+local WEAPON = script:FindAncestorByType('Weapon')
+if not WEAPON:IsA('Weapon') then
+    error(script.name .. " should be part of Weapon object hierarchy.")
+end
+local LOCAL_PLAYER = Game.GetLocalPlayer()
+-------------------------------------------------------------------------------------------------
+-- Abilities
+local Abilities_Store = script:GetCustomProperty("Abilities_Client"):WaitForObject()
+local Ability_FireBall = Abilities_Store:GetCustomProperty("Ability_UI_1") 
+local Ability_FireSlash = Abilities_Store:GetCustomProperty("Ability_UI_2")
+local USE = script:GetCustomProperty("Use"):WaitForObject()
+local SWITCH = script:GetCustomProperty("Switch"):WaitForObject()
+local Ability_List = {}
+-- Cast Duration USE
+local MinCharge = 0.3
+local MaxCharge = USE.castPhaseSettings.duration
+-- Timers
+local Start_Time = nil
+local Pull_Duration = nil
+local DEFAULT_LIFE_SPAN = 2
+-- UI Ability
+local UI_CONTAINER = script:GetCustomProperty("UIContainer"):WaitForObject()
+local ABILITY_1_FRONT = script:GetCustomProperty("Ability1_Front"):WaitForObject()
+local ABILITY_1_FRONT_IMAGE = script:GetCustomProperty("Ability1_Front_Image"):WaitForObject()
+local ABILITY_1_RETRO = script:GetCustomProperty("Ability1_Retro"):WaitForObject()
+local ABILITY_1_RETRO_IMAGE = script:GetCustomProperty("Ability1_Retro_Image"):WaitForObject()
+local ABILITY_SWITCH = script:GetCustomProperty("Ability_Switch"):WaitForObject()
+-- Casting_VFX_SFX_Ability_1 
+local CASTING_VFX_LOW = script:GetCustomProperty("Casting_VFX_Low")
+local CASTING_VFX_MEDIUM = script:GetCustomProperty("Casting_VFX_Medium")
+local CASTING_VFX_BIG = script:GetCustomProperty("Casting_VFX_Big")
+local CASTING_VFX_MAX = script:GetCustomProperty("Casting_VFX_Max")
+-- Muzzle_VFX_SFX 
+local MUZZLE_SMALL  = script:GetCustomProperty("Muzzle_Small")
+local MUZZLE_MEDIUM = script:GetCustomProperty("Muzzle_Medium")
+local MUZZLE_BIG    = script:GetCustomProperty("Muzzle_Big")
+local MUZZLE_MAX    = script:GetCustomProperty("Muzzle_Max")
+-- ChargeHands_Vfx 
+local CHARGE_UP_SFX = script:GetCustomProperty("ChargeUpSFX"):WaitForObject()
+local CHARGE_UP_VFX = script:GetCustomProperty("ChargeUpVFX"):WaitForObject()
+local CHARGE_UP_VFX1 = script:GetCustomProperty("ChargeUpVFX1"):WaitForObject()
+local defaultPitch = CHARGE_UP_SFX.pitch
+-- Melee_VFX_SFX 
+local PLAYER_IMPACT = script:GetCustomProperty("PlayerImpact")
+local OBJECT_IMPACT = script:GetCustomProperty("ObjectImpact")
+-- Swing_VFX_SFX 
+local SWING_EFFECT = script:GetCustomProperty("SwingEffect")
+local SWING_SOUND = script:GetCustomProperty("SwingSound")
+local SWING_SPAWN_DELAY = script:GetCustomProperty("SwingSpawnDelay")
+local SWING_ROTATION_X = script:GetCustomProperty("SwingRotationX")
+local SWING_ROTATION_Y = script:GetCustomProperty("SwingRotationY")
+-- User exposed properties
+local HIT_SPHERE_RADIUS = WEAPON:GetCustomProperty("HitSphereRadius")
+local HIT_SPHERE_OFFSET = WEAPON:GetCustomProperty("HitSphereOffset")
+local HIT_SPHERE_RADIUS_STORE = HIT_SPHERE_RADIUS
+local canAttack = false
+local CURRENT_SWING = nil
+local ignoreList = {}
+-------------------------------------------------------------------------------------------------
+-- Listeners Ability Phase
+local listeners = {}
+local function DisconnectListeners()
+	for _, listener in ipairs(listeners) do
+		if listener.isConnected then
+			listener:Disconnect()
+			listener = nil
+		end
+	end
+end
+-------------------------------------------------------------------------------------------------
+-- Casting VFX/SFX
+function Tick(deltaTime)
+    if Object.IsValid(USE) and LOCAL_PLAYER == USE.owner then
+        if Ability_List[1] == Ability_FireBall then
+            if USE:GetCurrentPhase() == AbilityPhase.CAST then
+                local rot = LOCAL_PLAYER:GetWorldRotation()
+                local pos = LOCAL_PLAYER:GetWorldPosition()
+                local chargeTime = math.max(0, MaxCharge - USE:GetPhaseTimeRemaining())
+                if chargeTime > MinCharge and chargeTime < 0.7 then
+                    local Cast_Low = nil
+                    Cast_Low = World.SpawnAsset(CASTING_VFX_LOW, {position= pos})
+                    Cast_Low:AttachToPlayer(LOCAL_PLAYER, "root")
+                    Task.Wait(1)
+                end  
+                if chargeTime >= 0.7 and chargeTime < 1.5 then
+                    local Cast_Normal = nil
+                    Cast_Normal = World.SpawnAsset(CASTING_VFX_MEDIUM, {position= pos})
+                    Cast_Normal:AttachToPlayer(LOCAL_PLAYER, "root")
+                    Task.Wait(1)
+                end
+                if chargeTime >= 1.5 and chargeTime < 2.8 then
+                    local Cast_Big = nil
+                    Cast_Big = World.SpawnAsset(CASTING_VFX_BIG, {position= pos})
+                    Cast_Big:AttachToPlayer(LOCAL_PLAYER, "root")
+                    Task.Wait(1)
+                end
+                if chargeTime >= 2.8 then
+                    local Cast_Max = nil
+                    Cast_Max = World.SpawnAsset(CASTING_VFX_MAX, {position= pos})
+                    Cast_Max:AttachToPlayer(LOCAL_PLAYER, "root")
+                    Task.Wait(1)
+                end
+            end
+        end
+    end
+end
+-------------------------------------------------------------------------------------------------
+-- Checks the players within Sphere, and makes sure swipe effects stay at the player's location
+function Tick_Sphere(ability, deltaTime)
+    -- Check for the existence of the equipment or owner before running Tick
+    if not Object.IsValid(ability) then return end
+    if not Object.IsValid(ability.owner) then return end
+    if ability.owner ~= LOCAL_PLAYER then return end
+    if ability.owner.isDead then return end
+    -- Always keep the current swipe at the position of the player
+    if Object.IsValid(CURRENT_SWING) then
+        CURRENT_SWING:SetWorldPosition(ability.owner:GetWorldPosition())
+    end
+    if canAttack then
+        DetectAndDamageInSphere(GetHitSpherePosition(), HIT_SPHERE_RADIUS, ability)
+    end
+end
+listeners[#listeners+1] = USE.tickEvent:Connect(Tick_Sphere)
+-------------------------------------------------------------------------------------------------
+-- Returns position of the hit sphere based on equipment owner player position and offset
+function GetHitSpherePosition()
+    if not Object.IsValid(WEAPON) then return Vector3.ZERO end
+    if not Object.IsValid(WEAPON.owner) then return USE:GetWorldPosition() end
+    local ownerTransform = WEAPON.owner:GetWorldTransform()
+    return WEAPON.owner:GetWorldPosition() + 
+            ownerTransform:GetForwardVector() * HIT_SPHERE_OFFSET.x + 
+            ownerTransform:GetRightVector() * HIT_SPHERE_OFFSET.y + 
+            ownerTransform:GetUpVector() * HIT_SPHERE_OFFSET.z
+end
+-------------------------------------------------------------------------------------------------
+-- Returns the valid Player or Damageable object
+function GetValidTarget(target)
+    if not Object.IsValid(target) then return end
+    if Object.IsValid(target) then
+        return target
+    else
+        return target:FindAncestorByType("Damageable")
+    end
+end
+-------------------------------------------------------------------------------------------------
+-- Creates sphere cast to detect valid object to apply damage on
+function DetectAndDamageInSphere(center, radius, ability)
+    local hitResults = World.SpherecastAll(center, center + Vector3.FORWARD, radius)
+    for index, hitResult in ipairs(hitResults) do
+        local validTarget = GetValidTarget(hitResult.other)
+        if validTarget then
+            MeleeAttack(validTarget, hitResult:GetImpactPosition(), ability)
+        end
+    end
+end
+
+-------------------------------------------------------------------------------------------------
+-- Detect players or damagable objects within hitbox to apply damage
+function MeleeAttack(target, impactPosition, ability)
+    if not Object.IsValid(target) then return end
+    if not Object.IsValid(ability) then return end
+    if not Object.IsValid(ability.owner) then return end
+    -- Ignore if the hitbox is overlapping with the owner
+    if target == ability.owner then return end
+    -- Ignore friendly attack
+    if Teams.AreTeamsFriendly(target.team, ability.owner.team) then return end
+    -- Avoid hitting the same player multiple times in a single swing
+    if (ignoreList[target] ~= 1) then
+        -- Spawn player or object impact vfx template
+        if target then
+            SpawnImpactEffect(PLAYER_IMPACT, impactPosition)
+        elseif target:IsA("Damageable") then
+            SpawnImpactEffect(OBJECT_IMPACT, impactPosition)
+        end
+        ignoreList[target] = 1
+    end
+end
+-------------------------------------------------------------------------------------------------
+-- Spawns impact effect based on given position
+function SpawnImpactEffect(effect, impactPosition)
+    if not effect then return end
+    local impactInstance = World.SpawnAsset(effect, {position = impactPosition})
+    if impactInstance.lifeSpan == 0 then
+        impactInstance.lifeSpan = DEFAULT_LIFE_SPAN
+    end
+end
+-------------------------------------------------------------------------------------------------
+-- Spawns swing effect based settings on the ability
+function SpawnSwingEffect(ability)
+    Task.Wait(SWING_SPAWN_DELAY)
+    -- Spawn the ability vfx only if the equiment and owner exist after the delay
+    if Object.IsValid(WEAPON) and Object.IsValid(WEAPON.owner) then
+        -- Spawn the swing effect
+        CURRENT_SWING = World.SpawnAsset(SWING_EFFECT, {
+            position = WEAPON.owner:GetWorldPosition(),
+            rotation = Rotation.New(SWING_ROTATION_X, SWING_ROTATION_Y, WEAPON.owner:GetWorldRotation().z)})
+        -- Apply default life span if the vfx template doesn't have a lifespan
+        if CURRENT_SWING.lifeSpan == 0 then
+            CURRENT_SWING.lifeSpan = DEFAULT_LIFE_SPAN
+        end
+        -- Spawn swing sound for every ability execute
+        if SWING_SOUND then
+            local swingSoundInstance = World.SpawnAsset(SWING_SOUND, {
+                position = WEAPON.owner:GetWorldPosition()})
+            -- Apply default life span if the swing sound template doesn't have a lifespan
+            if swingSoundInstance.lifeSpan == 0 then
+                swingSoundInstance.lifeSpan = DEFAULT_LIFE_SPAN
+            end
+        end
+    end
+end
+-------------------------------------------------------------------------------------------------
+function OnAbilityReady(ability)
+    if ability.owner == LOCAL_PLAYER then
+        if Ability_List[1] == Ability_FireBall then
+        end
+        if Ability_List[1] == Ability_FireSlash then
+            canAttack = false
+            ignoreList = {}
+        end
+    end
+end
+listeners[#listeners+1] = USE.readyEvent:Connect(OnAbilityReady)
+-------------------------------------------------------------------------------------------------
+function OnAbilityCast(ability)
+    if ability.owner == LOCAL_PLAYER then
+        if Object.IsValid(CHARGE_UP_VFX) and Object.IsValid(CHARGE_UP_VFX1) then
+            if not CHARGE_UP_SFX.isPlaying then
+                CHARGE_UP_SFX:Play()
+            end
+            CHARGE_UP_VFX.visibility = Visibility.INHERIT
+            CHARGE_UP_VFX1.visibility = Visibility.INHERIT
+            CHARGE_UP_VFX:SetSmartProperty("Enable Arc Rings", true)
+            CHARGE_UP_VFX1:SetSmartProperty("Enable Arc Rings", true)
+            CHARGE_UP_VFX:AttachToPlayer(ability.owner, "right_prop")
+            CHARGE_UP_VFX1:AttachToPlayer(ability.owner, "left_prop")
+            CHARGE_UP_VFX:Play()
+            CHARGE_UP_VFX1:Play()
+            CHARGE_UP_SFX.pitch = (ability:GetPhaseTimeRemaining()) * 300 + defaultPitch
+        end
+        if Ability_List[1] == Ability_FireBall then
+            Start_Time = nil
+            Start_Time = time()
+            
+        end
+        if Ability_List[1] == Ability_FireSlash then
+            canAttack = false
+            ignoreList = {}
+        end
+    end
+end 
+listeners[#listeners+1] = USE.castEvent:Connect(OnAbilityCast)
+-------------------------------------------------------------------------------------------------
+function OnAbilityExecute(ability)
+    if ability.owner == LOCAL_PLAYER then
+        if CHARGE_UP_SFX.isPlaying then
+            CHARGE_UP_SFX:Stop()
+        end
+        if Object.IsValid(CHARGE_UP_VFX) and Object.IsValid(CHARGE_UP_VFX1) then
+            CHARGE_UP_VFX:Stop()
+            CHARGE_UP_VFX1:Stop()
+            CHARGE_UP_VFX.visibility = Visibility.FORCE_OFF
+            CHARGE_UP_VFX1.visibility = Visibility.FORCE_OFF
+        end
+        if Ability_List[1] == Ability_FireBall then
+            Pull_Duration = time() - Start_Time
+            local spawnPosition = ability.owner:GetWorldPosition() + Vector3.New(0,0,25)
+            --Spawn Muzzle
+            local MuzzleSpawn = nil
+            if Pull_Duration < 1.5 then
+                MuzzleSpawn = World.SpawnAsset(MUZZLE_SMALL, {position = spawnPosition})
+            elseif Pull_Duration >= 1.5 and Pull_Duration < 2.5 then
+                MuzzleSpawn = World.SpawnAsset(MUZZLE_MEDIUM, {position = spawnPosition})
+            elseif Pull_Duration >= 2.5 and Pull_Duration <= 3.6 then
+                MuzzleSpawn = World.SpawnAsset(MUZZLE_BIG, {position = spawnPosition})
+            elseif Pull_Duration > 3.6 then
+                MuzzleSpawn = World.SpawnAsset(MUZZLE_MAX, {position = spawnPosition})
+            end
+        end
+        if Ability_List[1] == Ability_FireSlash then
+            canAttack = true
+            ignoreList = {}
+            SpawnSwingEffect(ability) 
+        end
+        Start_Time = nil
+    end
+end
+listeners[#listeners+1] = USE.executeEvent:Connect(OnAbilityExecute)
+-------------------------------------------------------------------------------------------------
+function OnAbilityRecovery(ability)
+    if ability.owner == LOCAL_PLAYER then
+        CHARGE_UP_SFX.pitch = defaultPitch
+        if Ability_List[1] == Ability_FireBall then
+        end
+        if Ability_List[1] == Ability_FireSlash then
+            canAttack = false
+            ignoreList = {}
+        end
+    end
+end 
+listeners[#listeners+1] = USE.recoveryEvent:Connect(OnAbilityRecovery)
+-------------------------------------------------------------------------------------------------
+function OnAbilityCooldown(ability)
+    if ability.owner == LOCAL_PLAYER then
+        if Ability_List[1] == Ability_FireBall then
+        end
+        if Ability_List[1] == Ability_FireSlash then
+            canAttack = false
+            ignoreList = {}
+        end
+    end
+end 
+listeners[#listeners+1] = USE.cooldownEvent:Connect(OnAbilityCooldown)
+-------------------------------------------------------------------------------------------------
+function OnAbilityInterrupted(ability)
+    if ability.owner == LOCAL_PLAYER then
+        CHARGE_UP_SFX.pitch = defaultPitch
+        if Object.IsValid(CHARGE_UP_VFX) and Object.IsValid(CHARGE_UP_VFX1) then
+	        CHARGE_UP_SFX:Stop()
+            CHARGE_UP_VFX:Stop()
+            CHARGE_UP_VFX1:Stop()
+            CHARGE_UP_VFX.visibility = Visibility.FORCE_OFF
+            CHARGE_UP_VFX1.visibility = Visibility.FORCE_OFF
+        end
+        if Ability_List[1] == Ability_FireBall then
+        end
+        if Ability_List[1] == Ability_FireSlash then
+            canAttack = false
+            ignoreList = {}
+        end
+    end
+end 
+listeners[#listeners+1] = USE.interruptedEvent:Connect(OnAbilityInterrupted)
+-----------------------------------------------------------------------------------------------------------
+---------------------------------------  Store Abilities Client -------------------------------------------
+-----------------------------------------------------------------------------------------------------------
+function StoreList_Abilities_Client(ui)
+    table.insert(Ability_List, ui)
+    SetUis()
+end
+Events.Connect("Ability", StoreList_Abilities_Client)
+-----------------------------------------------------------------------------------------------------------
+---------------------------------------  Ability SWITCH Client  -------------------------------------------
+-----------------------------------------------------------------------------------------------------------
+-- Switch on Execute
+function OnExecute_Switch(ability)
+    if ability.owner == LOCAL_PLAYER then
+        SwitchUIs()
+    end
+end
+listeners[#listeners+1] = SWITCH.executeEvent:Connect(OnExecute_Switch)
+-------------------------------------------------------------------------------------------
+-- Change Ability_List
+function SwitchUIs()
+    local temp = table.remove(Ability_List, 1)
+	table.insert(Ability_List, temp)
+    SetUis()
+end
+-------------------------------------------------------------------------------------------
+-- Change Icon
+function SetUis()
+    if Ability_List[1] then
+        ABILITY_1_FRONT.visibility = Visibility.INHERIT
+        ABILITY_1_FRONT_IMAGE:SetImage(Ability_List[1])
+    end
+    if next(Ability_List, 1) then
+        ABILITY_1_RETRO.visibility = Visibility.INHERIT
+        ABILITY_SWITCH.visibility = Visibility.INHERIT
+        ABILITY_1_RETRO_IMAGE:SetImage(Ability_List[2])
+    end
+end
+-------------------------------------------------------------------------------------------
+-- UI Container control visibility on equip
+function OnEquipped(weapon, player)
+    if player == LOCAL_PLAYER then
+        UI_CONTAINER.visibility = Visibility.FORCE_ON
+    end
+end
+WEAPON.equippedEvent:Connect(OnEquipped)
+-------------------------------------------------------------------------------------------
+-- UI Container control visibility on unequip
+function OnUnequipped(weapon, player)
+    if player == LOCAL_PLAYER then
+        UI_CONTAINER.visibility = Visibility.FORCE_OFF
+        canAttack = false
+        ignoreList = {}
+    end
+end
+WEAPON.unequippedEvent:Connect(OnUnequipped)
+-------------------------------------------------------------------------------------------
+script.destroyEvent:Connect(function()DisconnectListeners()end)
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
